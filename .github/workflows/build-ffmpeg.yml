@@ -1,0 +1,67 @@
+# Сборка FFmpeg-декодера звука для PL IPTV Player под лицензией LGPL
+# (Media3 1.6.1 + FFmpeg 6.0, только звуковые декодеры, без --enable-gpl).
+# Запуск: вкладка Actions → «Build FFmpeg (LGPL)» → Run workflow.
+# Результат: артефакт ffmpeg-decoder-aar (файл .aar) + исходники FFmpeg для соблюдения LGPL.
+name: Build FFmpeg (LGPL)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      MEDIA3_VERSION: "1.6.1"
+      FFMPEG_BRANCH: "release/6.0"
+      NDK_VERSION: "26.1.10909125"
+    steps:
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" "cmake;3.22.1" > /dev/null
+          echo "NDK_PATH=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Исходники Media3 и FFmpeg
+        run: |
+          git clone --depth 1 --branch "${MEDIA3_VERSION}" https://github.com/androidx/media.git media
+          git clone --depth 1 --branch "${FFMPEG_BRANCH}" https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          # исходники FFmpeg кладём рядом с результатом (требование LGPL — давать исходный код)
+          tar -czf ffmpeg-6.0-source.tar.gz --exclude=.git ffmpeg
+
+      - name: Сборка FFmpeg (только звук, LGPL)
+        run: |
+          FFMPEG_MODULE_PATH="$PWD/media/libraries/decoder_ffmpeg/src/main"
+          ln -s "$PWD/ffmpeg" "$FFMPEG_MODULE_PATH/jni/ffmpeg"
+          cd "$FFMPEG_MODULE_PATH/jni"
+          ./build_ffmpeg.sh "$FFMPEG_MODULE_PATH" "$NDK_PATH" "linux-x86_64" 21 \
+            vorbis opus flac alac pcm_mulaw pcm_alaw mp3 aac ac3 eac3 dca mlp truehd
+          # проверка: в сборке не должно быть GPL
+          grep -q "enable-gpl" ../jni/build_ffmpeg.sh && { echo "НАЙДЕН --enable-gpl"; exit 1; } || echo "LGPL: ок"
+
+      - name: Сборка .aar
+        run: |
+          cd media
+          echo 'android { ndkVersion "'"${NDK_VERSION}"'" }' >> libraries/decoder_ffmpeg/build.gradle
+          ./gradlew --no-daemon :lib-decoder-ffmpeg:assembleRelease
+          mkdir -p ../out
+          find . -name "*decoder-ffmpeg*release*.aar" -exec cp {} ../out/lib-decoder-ffmpeg-release.aar \;
+          ls -la ../out
+
+      - name: Результат — .aar
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-decoder-aar
+          path: out/lib-decoder-ffmpeg-release.aar
+          if-no-files-found: error
+
+      - name: Исходники FFmpeg (для LGPL)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-6.0-source
+          path: ffmpeg-6.0-source.tar.gz
